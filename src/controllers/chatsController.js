@@ -1,0 +1,468 @@
+const createError = require("http-errors");
+
+
+const { successResponse } = require("./responseController");
+const pool = require("../../config/db");
+
+
+const handleGetChats = async (req, res, next) => {
+    try {
+        const userId = req.user.id; // passport JWT থেকে আসবে
+
+        const result = await pool.query(
+            `
+            SELECT 
+                c.id,
+                c.title,
+                c.default_model_id,
+                m.slug AS default_model_slug,
+                m.display_name AS default_model_name,
+                c.total_messages,
+                c.total_tokens_used,
+                c.last_message_at,
+                c.created_at
+            FROM chats c
+            LEFT JOIN models m ON c.default_model_id = m.id
+            WHERE c.user_id = $1 
+              AND c._deleted = false
+            ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC
+            `,
+            [userId]
+        );
+
+        return successResponse(res, {
+            statusCode: 200,
+            message: "User chats fetched successfully",
+            payload: result.rows
+        });
+    } catch (err) {
+        next(err);
+    }
+};
+
+
+const handleCreateChat = async (req, res, next) => {
+    try {
+        const userId = req.user.id; // JWT থেকে আসবে
+
+        // ফ্রন্টএন্ড থেকে আসতে পারে (অপশনাল)
+        const { title, default_model_slug, system_prompt } = req.body;
+
+        // যদি model_slug না দেয়, তাহলে ডিফল্ট মডেল হিসেবে Gemini বা GPT-4o নিবে
+        let modelId = null;
+
+        if (default_model_slug) {
+            const modelResult = await pool.query(
+                `SELECT id FROM models WHERE slug = $1 AND is_active = true`,
+                [default_model_slug]
+            );
+            if (modelResult.rows.length === 0) {
+                return next(createError(400, "Invalid or inactive model slug"));
+            }
+            modelId = modelResult.rows[0].id;
+        } else {
+            // ডিফল্ট মডেল: Gemini 2.0 Flash (তোর টেবিলে যেটা আছে)
+            const defaultModel = await pool.query(
+                `SELECT id FROM models WHERE slug = 'gemini-2.0-flash' AND is_active = true`
+            );
+            modelId = defaultModel.rows[0]?.id || 1; // ফলব্যাক
+        }
+
+        // টাইটেল না দিলে ডিফল্ট দিবে
+        const chatTitle = title?.trim() || "নতুন চ্যাট";
+
+        const result = await pool.query(
+            `
+            INSERT INTO chats (
+                user_id, 
+                title, 
+                system_prompt, 
+                default_model_id
+            ) VALUES ($1, $2, $3, $4)
+            RETURNING 
+                id, title, default_model_id, created_at
+            `,
+            [userId, chatTitle, system_prompt || null, modelId]
+        );
+
+        const newChat = result.rows[0];
+
+        // মডেলের নাম + স্লাগ যোগ করে দিচ্ছি (ফ্রন্টএন্ডের জন্য সুবিধা)
+        const modelInfo = await pool.query(
+            `SELECT slug, display_name FROM models WHERE id = $1`,
+            [newChat.default_model_id]
+        );
+
+        const responsePayload = {
+            ...newChat,
+            default_model_slug: modelInfo.rows[0].slug,
+            default_model_name: modelInfo.rows[0].display_name
+        };
+
+        return successResponse(res, {
+            statusCode: 201,
+            message: "Chat created successfully",
+            payload: responsePayload
+        });
+
+    } catch (err) {
+        // ডুপ্লিকেট বা অন্য এরর হলে
+        if (err.code === "23505") {
+            return next(createError(409, "Chat already exists"));
+        }
+        next(err);
+    }
+};
+
+
+const handleGetChatById = async (req, res, next) => {
+    try {
+        const userId = req.user.id;
+        const chatId = req.params.id;
+
+        // চ্যাটটা আছে কি না + ইউজারের কি না চেক
+        const chatResult = await pool.query(
+            `
+            SELECT 
+                c.id,
+                c.title,
+                c.system_prompt,
+                c.default_model_id,
+                m.slug AS default_model_slug,
+                m.display_name AS default_model_name,
+                c.total_messages,
+                c.total_tokens_used,
+                c.estimated_cost_cents,
+                c.created_at,
+                c.last_message_at
+            FROM chats c
+            LEFT JOIN models m ON c.default_model_id = m.id
+            WHERE c.id = $1 
+              AND c.user_id = $2 
+              AND c._deleted = false
+            `,
+            [chatId, userId]
+        );
+
+        if (chatResult.rows.length === 0) {
+            return next(createError(404, "Chat not found or access denied"));
+        }
+
+        const chat = chatResult.rows[0];
+
+        // এই চ্যাটের সব মেসেজ নিয়ে আসা (chronological order)
+        const messagesResult = await pool.query(
+            `
+            SELECT 
+                id,
+                role,
+                content,
+                model_slug,
+                tokens_used,
+                created_at
+            FROM messages 
+            WHERE chat_id = $1 
+            ORDER BY created_at ASC
+            `,
+            [chatId]
+        );
+
+        const responsePayload = {
+            ...chat,
+            messages: messagesResult.rows
+        };
+
+        return successResponse(res, {
+            statusCode: 200,
+            message: "Chat and messages fetched successfully",
+            payload: responsePayload
+        });
+
+    } catch (err) {
+        next(err);
+    }
+};
+
+
+const handleUpdateChat = async (req, res, next) => {
+    try {
+        const userId = req.user.id;
+        const chatId = req.params.id;
+
+        const { title, default_model_slug, is_archived } = req.body;
+
+        // কী কী আপডেট করতে চাইছে সেটা চেক করি
+        if (!title && !default_model_slug && is_archived === undefined) {
+            return next(createError(400, "Nothing to update. Provide title, default_model_slug or is_archived"));
+        }
+
+        // চ্যাটটা ইউজারের কি না চেক
+        const chatCheck = await pool.query(
+            `SELECT id, user_id FROM chats WHERE id = $1 AND _deleted = false`,
+            [chatId]
+        );
+
+        if (chatCheck.rows.length === 0) {
+            return next(createError(404, "Chat not found"));
+        }
+        if (chatCheck.rows[0].user_id !== userId) {
+            return next(createError(403, "You don't own this chat"));
+        }
+
+        // মডেল স্লাগ দেওয়া থাকলে → আইডি বের করি
+        let newModelId = null;
+        if (default_model_slug) {
+            const modelResult = await pool.query(
+                `SELECT id FROM models WHERE slug = $1 AND is_active = true`,
+                [default_model_slug]
+            );
+            if (modelResult.rows.length === 0) {
+                return next(createError(400, "Invalid or inactive model"));
+            }
+            newModelId = modelResult.rows[0].id;
+        }
+
+        // আপডেট কোয়েরি (শুধু যেগুলো দেওয়া আছে সেগুলোই আপডেট হবে)
+        const updates = [];
+        const values = [];
+        let index = 1;
+
+        if (title !== undefined) {
+            updates.push(`title = $${index++}`);
+            values.push(title.trim() || "নতুন চ্যাট");
+        }
+        if (newModelId !== null) {
+            updates.push(`default_model_id = $${index++}`);
+            values.push(newModelId);
+        }
+        if (is_archived !== undefined) {
+            updates.push(`is_archived = $${index++}`);
+            values.push(is_archived);
+        }
+
+        updates.push(`updated_at = CURRENT_TIMESTAMP`);
+        values.push(chatId, userId);
+
+        const query = `
+            UPDATE chats 
+            SET ${updates.join(", ")}
+            WHERE id = $${index - 1} AND user_id = $${index}
+            RETURNING 
+                id, title, is_archived, default_model_id, updated_at
+        `;
+
+        const result = await pool.query(query, values);
+
+        // আপডেটেড চ্যাট + মডেলের নাম যোগ করে দিচ্ছি
+        const updatedChat = result.rows[0];
+
+        const modelInfo = await pool.query(
+            `SELECT slug, display_name FROM models WHERE id = $1`,
+            [updatedChat.default_model_id]
+        );
+
+        const responsePayload = {
+            ...updatedChat,
+            default_model_slug: modelInfo.rows[0].slug,
+            default_model_name: modelInfo.rows[0].display_name
+        };
+
+        return successResponse(res, {
+            statusCode: 200,
+            message: "Chat updated successfully",
+            payload: responsePayload
+        });
+
+    } catch (err) {
+        next(err);
+    }
+};
+
+
+const handleDeleteChat = async (req, res, next) => {
+    try {
+        const userId = req.user.id;
+        const chatId = req.params.id;
+
+        // চ্যাটটা ইউজারের কি না চেক করি
+        const chatCheck = await pool.query(
+            `SELECT id, user_id, _deleted FROM chats WHERE id = $1`,
+            [chatId]
+        );
+
+        if (chatCheck.rows.length === 0) {
+            return next(createError(404, "Chat not found"));
+        }
+
+        const chat = chatCheck.rows[0];
+
+        if (chat.user_id !== userId) {
+            return next(createError(403, "You are not allowed to delete this chat"));
+        }
+
+        // যদি ইতিমধ্যে ডিলিট করা থাকে
+        if (chat._deleted === true) {
+            return next(createError(400, "Chat already deleted"));
+        }
+
+        // সফট ডিলিট করি
+        const result = await pool.query(
+            `
+            UPDATE chats 
+            SET 
+                _deleted = true,
+                deleted_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1 AND user_id = $2
+            RETURNING id, title, _deleted, deleted_at
+            `,
+            [chatId, userId]
+        );
+
+        return successResponse(res, {
+            statusCode: 200,
+            message: "Chat deleted successfully (soft delete)",
+            payload: result.rows[0]
+        });
+
+    } catch (err) {
+        next(err);
+    }
+};
+
+
+const handleRegenerateTitle = async (req, res, next) => {
+
+    try {
+        const userId = req.user.id;
+        const chatId = req.params.id;
+
+        // চ্যাট চেক + মালিকানা চেক
+        const chatResult = await pool.query(
+            `SELECT id, user_id, default_model_id FROM chats WHERE id = $1 AND _deleted = false`,
+            [chatId]
+        );
+
+        if (chatResult.rows.length === 0) {
+            return next(createError(404, "Chat not found"));
+        }
+        if (chatResult.rows[0].user_id !== userId) {
+            return next(createError(403, "Access denied"));
+        }
+
+        const defaultModelId = chatResult.rows[0].default_model_id;
+
+        // চ্যাটের প্রথম ১৫টা মেসেজ নিব (টাইটেল বানানোর জন্য)
+        const messagesResult = await pool.query(
+            `SELECT role, content FROM messages WHERE chat_id = $1 ORDER BY created_at ASC LIMIT 15`,
+            [chatId]
+        );
+
+        if (messagesResult.rows.length === 0) {
+            return next(createError(400, "No messages to generate title"));
+        }
+
+        const messagesText = messagesResult.rows
+            .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+            .join("\n");
+
+        // ভাষা ডিটেক্ট করি (ইউজার কোন ভাষায় লিখেছে)
+        const firstUserMsg = messagesResult.rows.find(m => m.role === "user")?.content || "";
+        const hasBangla = /[\u0980-\u09FF]/.test(firstUserMsg);
+        const hasEnglish = /[a-zA-Z]/.test(firstUserMsg);
+
+        let languageInstruction = "বাংলায়";
+        if (hasEnglish && !hasBangla) {
+            languageInstruction = "ইংরেজিতে";
+        } else if (hasEnglish && hasBangla) {
+            languageInstruction = "যে ভাষায় বেশি লেখা হয়েছে সেই ভাষায় (বাংলা বা ইংরেজি)";
+        }
+
+        // সুপার ক্লিন প্রম্পট — Gemini, DeepSeek, GPT-4o সবাই বুঝবে
+        const prompt = `তুমি একজন প্রফেশনাল চ্যাট টাইটেল জেনারেটর। 
+        এই চ্যাটের বিষয়বস্তু দেখে একটা খুব সংক্ষিপ্ত, আকর্ষণীয় এবং মানানসই টাইটেল দাও।
+
+        নিয়ম:
+        - শুধু টাইটেল দিবে, কোনো ব্যাখ্যা/কোট/ইমোজি/মার্কডাউন দিবে না।
+        - সর্বোচ্চ ৬০ অক্ষর।
+        - টাইটেল ${languageInstruction} হতে হবে।
+
+        চ্যাট:
+        ${messagesText}
+
+        টাইটেল:`;
+
+        // মডেলের স্লাগ বের করি
+        const modelResult = await pool.query(
+            `SELECT slug FROM models WHERE id = $1`,
+            [defaultModelId]
+        );
+        const modelSlug = modelResult.rows[0]?.slug || "gemini-2.0-flash";
+
+        // প্রক্সি URL ঠিক করি — Gemini, DeepSeek, OpenAI সবাই চলবে
+        let proxyUrl = "http://localhost:5000/api/proxy/openai/chat"; // ডিফল্ট
+
+        if (modelSlug.includes("gemini")) {
+            proxyUrl = "http://localhost:5000/api/proxy/gemini/text";
+        } else if (modelSlug.includes("deepseek")) {
+            proxyUrl = "http://localhost:5000/api/proxy/deepseek/chat";
+        }
+        // GPT-4o হলে openai/chat থাকবে
+
+        // AI কে কল করি
+        const aiResponse = await fetch(proxyUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                messages: [{ role: "user", content: prompt }],
+                temperature: 0.7,
+                max_tokens: 60
+            })
+        });
+
+        const aiData = await aiResponse.json();
+
+        if (!aiResponse.ok || !aiData.choices?.[0]?.message?.content) {
+            return next(createError(502, "Failed to generate title from AI"));
+        }
+
+        let newTitle = aiData.choices[0].message.content.trim();
+        newTitle = newTitle.replace(/['"“”]/g, "").substring(0, 100);
+
+        // ডাটাবেসে টাইটেল আপডেট
+        const updateResult = await pool.query(
+            `UPDATE chats 
+             SET title = $1, updated_at = CURRENT_TIMESTAMP 
+             WHERE id = $2 AND user_id = $3 
+             RETURNING id, title, updated_at`,
+            [newTitle || "নতুন চ্যাট", chatId, userId]
+        );
+
+        return successResponse(res, {
+            statusCode: 200,
+            message: "Title regenerated successfully",
+            payload: {
+                id: updateResult.rows[0].id,
+                title: updateResult.rows[0].title,
+                updated_at: updateResult.rows[0].updated_at
+            }
+        });
+
+    } catch (err) {
+        next(err);
+    }
+};
+
+
+
+
+
+
+module.exports = {
+    handleGetChats,
+    handleCreateChat,
+    handleGetChatById,
+    handleUpdateChat,
+    handleDeleteChat,
+    handleRegenerateTitle,
+};

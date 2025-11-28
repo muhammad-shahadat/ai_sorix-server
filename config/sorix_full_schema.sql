@@ -209,20 +209,20 @@
 -- );
 
 -- 7. Models
-CREATE TABLE models (
-    id SERIAL PRIMARY KEY,
-    slug VARCHAR(100) NOT NULL UNIQUE,
-    provider VARCHAR(100) NOT NULL,
-    display_name VARCHAR(150) NOT NULL,
-    type VARCHAR(20) NOT NULL DEFAULT 'text' CHECK (type IN ('text','image','code','vision')),
-    api_endpoint VARCHAR(1024) NOT NULL,
-    max_tokens INTEGER NOT NULL DEFAULT 4096,
-    temperature_default NUMERIC(3,2) NOT NULL DEFAULT 0.7,
-    cost_per_1k_tokens NUMERIC(10,6) NOT NULL DEFAULT 0,
-    is_active BOOLEAN NOT NULL DEFAULT true,
-    priority INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+-- CREATE TABLE models (
+--     id SERIAL PRIMARY KEY,
+--     slug VARCHAR(100) NOT NULL UNIQUE,
+--     provider VARCHAR(100) NOT NULL,
+--     display_name VARCHAR(150) NOT NULL,
+--     type VARCHAR(20) NOT NULL DEFAULT 'text' CHECK (type IN ('text','image','code','vision')),
+--     api_endpoint VARCHAR(1024) NOT NULL,
+--     max_tokens INTEGER NOT NULL DEFAULT 4096,
+--     temperature_default NUMERIC(3,2) NOT NULL DEFAULT 0.7,
+--     cost_per_1k_tokens NUMERIC(10,6) NOT NULL DEFAULT 0,
+--     is_active BOOLEAN NOT NULL DEFAULT true,
+--     priority INTEGER NOT NULL DEFAULT 0,
+--     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+-- );
 
 -- 8. Chats
 CREATE TABLE chats (

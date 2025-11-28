@@ -1,5 +1,7 @@
+require("dotenv").config();
 const createError = require('http-errors');
-const SSLCommerzPayment = require('sslcommerz-lts');
+const SSLCommerzPayment = require("sslcommerz-lts");
+
 const pool = require("../../config/db");
 const { successResponse } = require("./responseController");
 
@@ -215,6 +217,7 @@ const handleCheckout = async (req, res, next) => {
 
         // SSLCommerz প্যারামিটার (তোর স্টাইলে)
         const post_data = {
+            
             total_amount: (plan.price_cents / 100).toFixed(2),
             currency: "BDT",
             tran_id: `SORIX_${Date.now()}_${userId}`,
@@ -235,6 +238,9 @@ const handleCheckout = async (req, res, next) => {
             value_b: plan.id,          // প্ল্যান আইডি
             value_c: plan.slug         // প্ল্যান স্লাগ
         };
+        
+        console.log(post_data)
+
 
         // SSLCommerz সেশন তৈরি (sandbox / live)
         const sslcz = new SSLCommerzPayment(
@@ -244,6 +250,8 @@ const handleCheckout = async (req, res, next) => {
         );
 
         const response = await sslcz.init(post_data);
+        
+        console.log(response);
 
         if (!response?.GatewayPageURL) {
             return next(createError(500, "Failed to create payment session"));

@@ -13,6 +13,7 @@ const plansRouter = require("./routes/plansRoute");
 const webhookRouter = require("./routes/webhookRoute");
 const modelsRouter = require("./routes/modelsRoute");
 const proxyRouter = require("./routes/proxyRoute");
+const chatsRouter = require("./routes/chatsRoute");
 
 
 
@@ -54,6 +55,8 @@ app.use("/api/webhook", webhookRouter);
 app.use("/api/models", modelsRouter);
 
 app.use("/api/proxy", proxyRouter);
+
+app.use("/api/chats", chatsRouter);
 
 
 

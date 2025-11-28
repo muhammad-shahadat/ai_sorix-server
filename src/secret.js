@@ -18,7 +18,9 @@ const nodeEnv = process.env.NODE_ENV;
 
 const smtpUsername = process.env.SMTP_USERNAME;
 const smtpPassword = process.env.SMTP_PASSWORD;
+
 const clientUrl = process.env.CLIENT_URL;
+const baseUrl = process.env.BASE_URL;
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
 
@@ -40,4 +42,5 @@ module.exports = {
     smtpPassword,
     clientUrl,
     geminiApiKey,
+    baseUrl,
 }
