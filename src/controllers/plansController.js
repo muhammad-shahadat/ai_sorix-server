@@ -239,19 +239,19 @@ const handleCheckout = async (req, res, next) => {
             value_c: plan.slug         // প্ল্যান স্লাগ
         };
         
-        console.log(post_data)
+        
 
 
         // SSLCommerz সেশন তৈরি (sandbox / live)
         const sslcz = new SSLCommerzPayment(
             process.env.SSLCOMMERZ_STORE_ID,
             process.env.SSLCOMMERZ_STORE_PASS,
-            process.env.NODE_ENV === 'production' ? false : true  // true = sandbox
+            process.env.NODE_ENV === 'production' ? true : false  // true = sandbox
         );
 
         const response = await sslcz.init(post_data);
         
-        console.log(response);
+       
 
         if (!response?.GatewayPageURL) {
             return next(createError(500, "Failed to create payment session"));

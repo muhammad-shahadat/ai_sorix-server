@@ -225,24 +225,24 @@
 -- );
 
 -- 8. Chats
-CREATE TABLE chats (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    title VARCHAR(512),
-    system_prompt TEXT,
-    default_model_id INTEGER NOT NULL REFERENCES models(id),
-    is_archived BOOLEAN NOT NULL DEFAULT false,
-    _deleted BOOLEAN NOT NULL DEFAULT false,
-    deleted_at TIMESTAMP,
-    total_messages INTEGER NOT NULL DEFAULT 0,
-    total_tokens_used BIGINT NOT NULL DEFAULT 0,
-    estimated_cost_cents INTEGER NOT NULL DEFAULT 0,
-    last_message_at TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX idx_chats_user ON chats(user_id, is_archived, _deleted);
-CREATE INDEX idx_chats_last_message ON chats(last_message_at DESC);
+-- CREATE TABLE chats (
+--     id BIGSERIAL PRIMARY KEY,
+--     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+--     title VARCHAR(512),
+--     system_prompt TEXT,
+--     default_model_id INTEGER NOT NULL REFERENCES models(id),
+--     is_archived BOOLEAN NOT NULL DEFAULT false,
+--     _deleted BOOLEAN NOT NULL DEFAULT false,
+--     deleted_at TIMESTAMP,
+--     total_messages INTEGER NOT NULL DEFAULT 0,
+--     total_tokens_used BIGINT NOT NULL DEFAULT 0,
+--     estimated_cost_cents INTEGER NOT NULL DEFAULT 0,
+--     last_message_at TIMESTAMP,
+--     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+-- );
+-- CREATE INDEX idx_chats_user ON chats(user_id, is_archived, _deleted);
+-- CREATE INDEX idx_chats_last_message ON chats(last_message_at DESC);
 
 -- 9. Messages - PARTITIONED + SUPER FAST
 CREATE TABLE messages (

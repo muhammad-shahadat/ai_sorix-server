@@ -1,6 +1,9 @@
 const express = require("express");
 
-const { handleGetChats, handleCreateChat, handleGetChatById, handleUpdateChat, handleDeleteChat, handleRegenerateTitle } = require("../controllers/chatsController");
+const authRole = require("../middleware/authRole");
+const passport = require("../passport");
+const { handleGetChats, handleCreateChat, handleGetChatById, handleUpdateChat, handleDeleteChat, handleRegenerateTitle, handleSendMessage } = require("../controllers/chatsController");
+
 
 
 const authenticate = passport.authenticate("jwt", { session: false });
@@ -21,7 +24,7 @@ router.get("/",
 // POST /api/chats → নতুন চ্যাট তৈরি করা
 router.post("/",
     authenticate, 
-    authRole("admin", "user"), 
+    authRole("admin", "user"),
     handleCreateChat
 
 );
@@ -54,6 +57,13 @@ router.post("/:id/regenerate-title",
     authenticate,
     authRole("admin", "user"), 
     handleRegenerateTitle
+);
+
+
+router.post("/:id/messages",
+    authenticate,
+    authRole("admin", "user"),
+    handleSendMessage
 );
 
 

@@ -1,8 +1,12 @@
 const createError = require("http-errors");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const OpenAI = require("openai");
+const axios = require("axios");
 
 
 const { successResponse } = require("./responseController");
 const pool = require("../../config/db");
+const { geminiApiKey } = require("../secret");
 
 
 const handleGetChats = async (req, res, next) => {
@@ -114,7 +118,6 @@ const handleCreateChat = async (req, res, next) => {
     }
 };
 
-
 const handleGetChatById = async (req, res, next) => {
     try {
         const userId = req.user.id;
@@ -189,16 +192,16 @@ const handleUpdateChat = async (req, res, next) => {
         const userId = req.user.id;
         const chatId = req.params.id;
 
-        const { title, default_model_slug, is_archived } = req.body;
+        const { title, default_model_slug, is_archived } = req.body || {};
 
-        // কী কী আপডেট করতে চাইছে সেটা চেক করি
+        // কিছুই পাঠানো হয়নি কি না চেক
         if (!title && !default_model_slug && is_archived === undefined) {
             return next(createError(400, "Nothing to update. Provide title, default_model_slug or is_archived"));
         }
 
         // চ্যাটটা ইউজারের কি না চেক
         const chatCheck = await pool.query(
-            `SELECT id, user_id FROM chats WHERE id = $1 AND _deleted = false`,
+            `SELECT id, user_id, default_model_id FROM chats WHERE id = $1 AND _deleted = false`,
             [chatId]
         );
 
@@ -209,7 +212,7 @@ const handleUpdateChat = async (req, res, next) => {
             return next(createError(403, "You don't own this chat"));
         }
 
-        // মডেল স্লাগ দেওয়া থাকলে → আইডি বের করি
+        // মডেল স্লাগ থাকলে আইডি বের করি
         let newModelId = null;
         if (default_model_slug) {
             const modelResult = await pool.query(
@@ -222,62 +225,69 @@ const handleUpdateChat = async (req, res, next) => {
             newModelId = modelResult.rows[0].id;
         }
 
-        // আপডেট কোয়েরি (শুধু যেগুলো দেওয়া আছে সেগুলোই আপডেট হবে)
+        // ডাইনামিক আপডেট কোয়েরি
         const updates = [];
         const values = [];
-        let index = 1;
+        let paramIndex = 1;
 
-        if (title !== undefined) {
-            updates.push(`title = $${index++}`);
+        if (title !== undefined && title !== null) {
+            updates.push(`title = $${paramIndex++}`);
             values.push(title.trim() || "নতুন চ্যাট");
         }
         if (newModelId !== null) {
-            updates.push(`default_model_id = $${index++}`);
+            updates.push(`default_model_id = $${paramIndex++}`);
             values.push(newModelId);
         }
         if (is_archived !== undefined) {
-            updates.push(`is_archived = $${index++}`);
-            values.push(is_archived);
+            updates.push(`is_archived = $${paramIndex++}`);
+            values.push(!!is_archived); // boolean হিসেবে সেভ
         }
 
+        // সবসময় updated_at আপডেট হবে
         updates.push(`updated_at = CURRENT_TIMESTAMP`);
-        values.push(chatId, userId);
+
+        // WHERE এর জন্য chatId আর userId (শেষে যোগ করছি)
+        values.push(chatId);  // এটা হবে $paramIndex
+        values.push(userId);  // এটা হবে $paramIndex + 1
 
         const query = `
             UPDATE chats 
             SET ${updates.join(", ")}
-            WHERE id = $${index - 1} AND user_id = $${index}
-            RETURNING 
-                id, title, is_archived, default_model_id, updated_at
+            WHERE id = $${paramIndex} AND user_id = $${paramIndex + 1}
+            RETURNING id, title, is_archived, default_model_id, updated_at
         `;
 
         const result = await pool.query(query, values);
 
-        // আপডেটেড চ্যাট + মডেলের নাম যোগ করে দিচ্ছি
+        if (result.rowCount === 0) {
+            return next(createError(500, "Failed to update chat"));
+        }
+
         const updatedChat = result.rows[0];
 
+        // মডেলের নাম + স্লাগ যোগ করা
         const modelInfo = await pool.query(
-            `SELECT slug, display_name FROM models WHERE id = $1`,
+            `SELECT slug AS default_model_slug, display_name AS default_model_name 
+             FROM models WHERE id = $1`,
             [updatedChat.default_model_id]
         );
 
-        const responsePayload = {
+        const payload = {
             ...updatedChat,
-            default_model_slug: modelInfo.rows[0].slug,
-            default_model_name: modelInfo.rows[0].display_name
+            default_model_slug: modelInfo.rows[0].default_model_slug,
+            default_model_name: modelInfo.rows[0].default_model_name
         };
 
         return successResponse(res, {
             statusCode: 200,
             message: "Chat updated successfully",
-            payload: responsePayload
+            payload
         });
 
     } catch (err) {
         next(err);
     }
 };
-
 
 const handleDeleteChat = async (req, res, next) => {
     try {
@@ -454,6 +464,163 @@ const handleRegenerateTitle = async (req, res, next) => {
 };
 
 
+const handleSendMessage = async (req, res, next) => {
+    const chatId = req.params.id;
+    const userId = req.user.id;
+    const { content, model_slug } = req.body;
+
+    if (!content || content.trim() === "") {
+        return next(createError(400, "Message content is required"));
+    }
+
+    const stream = req.query.stream !== "false"; // ডিফল্ট ট্রু
+
+    try {
+        // চ্যাট + ডিফল্ট মডেল আইডি + স্লাগ নে
+        const chatResult = await pool.query(
+            `SELECT c.default_model_id, m.slug AS default_slug 
+             FROM chats c 
+             LEFT JOIN models m ON c.default_model_id = m.id 
+             WHERE c.id = $1 AND c.user_id = $2 AND c._deleted = false`,
+            [chatId, userId]
+        );
+
+        if (chatResult.rows.length === 0) {
+            return next(createError(404, "Chat not found"));
+        }
+
+        // ফাইনাল model_id + slug নির্ধারণ
+        let modelId = chatResult.rows[0].default_model_id;
+        let finalModelSlug = chatResult.rows[0].default_slug || "gemini-1.5-flash";
+
+        if (model_slug) {
+            const custom = await pool.query(
+                `SELECT id, slug FROM models WHERE slug = $1 AND is_active = true`,
+                [model_slug]
+            );
+            if (custom.rows.length > 0) {
+                modelId = custom.rows[0].id;
+                finalModelSlug = custom.rows[0].slug;
+            }
+        }
+
+        // ইউজার মেসেজ সেভ — শুধু model_id
+        await pool.query(
+            `INSERT INTO messages (chat_id, user_id, role, content, model_id)
+             VALUES ($1, $2, 'user', $3, $4)`,
+            [chatId, userId, content.trim(), modelId]
+        );
+
+        await pool.query(`UPDATE chats SET last_message_at = CURRENT_TIMESTAMP WHERE id = $1`, [chatId]);
+
+        // Streaming headers
+        if (stream) {
+            res.setHeader("Content-Type", "text/plain; charset=utf-8");
+            res.setHeader("Transfer-Encoding", "chunked");
+            res.setHeader("Cache-Control", "no-cache");
+            res.setHeader("Connection", "keep-alive");
+        }
+
+        let fullResponse = "";
+        let promptTokens = 0;
+        let completionTokens = 0;
+
+        // ====== AI CALLS ======
+        if (finalModelSlug.includes("gemini")) {
+            const genAI = new GoogleGenerativeAI(geminiApiKey);
+            const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+            const result = await model.generateContentStream([content.trim()]);
+
+            for await (const chunk of result.stream) {
+                const text = chunk.text();
+                fullResponse += text;
+                if (stream) res.write(text);
+            }
+            const usage = result.response.usageMetadata;
+            promptTokens = usage?.promptTokenCount || 0;
+            completionTokens = usage?.candidatesTokenCount || 0;
+
+        } else if (finalModelSlug.includes("gpt") || finalModelSlug.includes("o1") || finalModelSlug.includes("4o")) {
+            const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+            const result = await openai.chat.completions.create({
+                model: finalModelSlug.includes("o1") ? "o1-preview" : "gpt-4o-mini",
+                messages: [{ role: "user", content }],
+                stream: true
+            });
+
+            for await (const chunk of result) {
+                const text = chunk.choices[0]?.delta?.content || "";
+                fullResponse += text;
+                if (stream) res.write(text);
+            }
+
+        } else {
+            // DeepSeek, Claude, Grok, Llama3, Mistral, Qwen → প্রক্সি দিয়ে
+            const response = await axios.post(
+                `${process.env.PROXY_BASE_URL}/v1/chat/completions`,
+                {
+                    model: finalModelSlug,
+                    messages: [{ role: "user", content }],
+                    stream: true
+                },
+                { responseType: "stream" }
+            );
+
+            response.data.pipe(res);
+
+            response.data.on("data", (chunk) => {
+                const lines = chunk.toString().split("\n");
+                for (const line of lines) {
+                    if (line.startsWith("data: ")) {
+                        const data = line.replace("data: ", "").trim();
+                        if (!data || data === "[DONE]") continue;
+                        try {
+                            const parsed = JSON.parse(data);
+                            const text = parsed.choices[0]?.delta?.content || "";
+                            fullResponse += text;
+                        } catch (e) {}
+                    }
+                }
+            });
+
+            await new Promise(resolve => response.data.on("end", resolve));
+        }
+
+        // স্ট্রিম শেষ
+        if (stream) res.end();
+        else res.json({ success: true, payload: { content: fullResponse } });
+
+        // AI রেসপন্স সেভ — শুধু model_id
+        await pool.query(
+            `INSERT INTO messages (chat_id, user_id, role, content, model_id, tokens_used)
+             VALUES ($1, $2, 'assistant', $3, $4, $5)`,
+            [chatId, userId, fullResponse, modelId, completionTokens || 0]
+        );
+
+        // টোকেন আপডেট
+        await pool.query(
+            `UPDATE chats 
+             SET total_tokens_used = total_tokens_used + $1,
+                 estimated_cost_cents = estimated_cost_cents + $2
+             WHERE id = $3`,
+            [promptTokens + completionTokens, Math.round((completionTokens || 0) * 0.02), chatId]
+        );
+
+        // অটো টাইটেল (প্রথম মেসেজ হলে)
+        const msgCount = await pool.query(`SELECT COUNT(*) FROM messages WHERE chat_id = $1`, [chatId]);
+        if (parseInt(msgCount.rows[0].count) === 2) {
+            // handleRegenerateTitle(chatId); // পরে যোগ করবি
+        }
+
+    } catch (err) {
+        console.error("SendMessage Error:", err.message);
+        if (!res.headersSent) {
+            next(createError(500, err.message || "Failed to send message"));
+        }
+    }
+};
+
+
 
 
 
@@ -465,4 +632,6 @@ module.exports = {
     handleUpdateChat,
     handleDeleteChat,
     handleRegenerateTitle,
+    handleSendMessage,
+    
 };
