@@ -14,6 +14,9 @@ const webhookRouter = require("./routes/webhookRoute");
 const modelsRouter = require("./routes/modelsRoute");
 const proxyRouter = require("./routes/proxyRoute");
 const chatsRouter = require("./routes/chatsRoute");
+const filesRouter = require("./routes/filesRoute");
+const userRouter = require("./routes/usersRoute");
+const adminsRouter = require("./routes/adminsRoute");
 
 
 
@@ -43,8 +46,11 @@ app.get("/", (req, res) =>{
 //users authentication route
 app.use("/api/auth/users", authRouter);
 
+app.use("/api/admins", adminsRouter);
+
+
 // //users route
-// app.use("/api/users", userRouter);
+app.use("/api/users", userRouter);
 
 //plans route
 app.use("/api/plans", plansRouter);
@@ -57,6 +63,8 @@ app.use("/api/models", modelsRouter);
 app.use("/api/proxy", proxyRouter);
 
 app.use("/api/chats", chatsRouter);
+
+app.use("/api/files", filesRouter);
 
 
 

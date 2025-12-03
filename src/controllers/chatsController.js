@@ -467,16 +467,17 @@ const handleRegenerateTitle = async (req, res, next) => {
 const handleSendMessage = async (req, res, next) => {
     const chatId = req.params.id;
     const userId = req.user.id;
-    const { content, model_slug } = req.body;
+    const { content, attachments = [], model_slug } = req.body;
 
-    if (!content || content.trim() === "") {
-        return next(createError(400, "Message content is required"));
+    // কন্টেন্ট না থাকলেও শুধু ফাইল থাকলে চলবে
+    if ((!content || content.trim() === "") && attachments.length === 0) {
+        return next(createError(400, "Message content or attachment is required"));
     }
 
-    const stream = req.query.stream !== "false"; // ডিফল্ট ট্রু
+    const stream = req.query.stream !== "false";
 
     try {
-        // চ্যাট + ডিফল্ট মডেল আইডি + স্লাগ নে
+        // চ্যাট + ডিফল্ট মডেল চেক
         const chatResult = await pool.query(
             `SELECT c.default_model_id, m.slug AS default_slug 
              FROM chats c 
@@ -489,7 +490,6 @@ const handleSendMessage = async (req, res, next) => {
             return next(createError(404, "Chat not found"));
         }
 
-        // ফাইনাল model_id + slug নির্ধারণ
         let modelId = chatResult.rows[0].default_model_id;
         let finalModelSlug = chatResult.rows[0].default_slug || "gemini-1.5-flash";
 
@@ -504,11 +504,17 @@ const handleSendMessage = async (req, res, next) => {
             }
         }
 
-        // ইউজার মেসেজ সেভ — শুধু model_id
+        // ইউজার মেসেজ + attachments সেভ করা
         await pool.query(
-            `INSERT INTO messages (chat_id, user_id, role, content, model_id)
-             VALUES ($1, $2, 'user', $3, $4)`,
-            [chatId, userId, content.trim(), modelId]
+            `INSERT INTO messages (chat_id, user_id, role, content, model_id, attachments)
+             VALUES ($1, $2, 'user', $3, $4, $5)`,
+            [
+                chatId,
+                userId,
+                content?.trim() || null,
+                modelId,
+                attachments.length > 0 ? JSON.stringify(attachments) : null
+            ]
         );
 
         await pool.query(`UPDATE chats SET last_message_at = CURRENT_TIMESTAMP WHERE id = $1`, [chatId]);
@@ -525,26 +531,78 @@ const handleSendMessage = async (req, res, next) => {
         let promptTokens = 0;
         let completionTokens = 0;
 
-        // ====== AI CALLS ======
+        // ==================== GEMINI (ছবি + PDF + DOCX সাপোর্ট) ====================
         if (finalModelSlug.includes("gemini")) {
             const genAI = new GoogleGenerativeAI(geminiApiKey);
-            const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-            const result = await model.generateContentStream([content.trim()]);
+            const model = genAI.getGenerativeModel({
+                model: "gemini-2.0-flash"
+            });
+
+            const parts = [];
+
+            if (content?.trim()) {
+                parts.push(content.trim());
+            }
+
+            // এখানে fileUri দিয়ে URL পাঠানো হচ্ছে — Base64 না!
+            if (attachments.length > 0) {
+                attachments.forEach(att => {
+                    parts.push({
+                        fileData: {
+                            fileUri: att.url,
+                            mimeType: att.type || "application/octet-stream"
+                        }
+                    });
+                });
+            }
+
+           
+
+            if (parts.length === 0) {
+                parts.push("এই ফাইলগুলো দেখে উত্তর দাও");
+            }
+
+            const result = await model.generateContentStream(parts);
 
             for await (const chunk of result.stream) {
                 const text = chunk.text();
                 fullResponse += text;
                 if (stream) res.write(text);
             }
+
             const usage = result.response.usageMetadata;
             promptTokens = usage?.promptTokenCount || 0;
             completionTokens = usage?.candidatesTokenCount || 0;
+        }
 
-        } else if (finalModelSlug.includes("gpt") || finalModelSlug.includes("o1") || finalModelSlug.includes("4o")) {
+        // ==================== GPT-4o / GPT-4o-mini (Vision সাপোর্ট) ====================
+        else if (finalModelSlug.includes("gpt") || finalModelSlug.includes("4o") || finalModelSlug.includes("o1")) {
             const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+            const messages = [];
+
+            if (attachments.length > 0 && finalModelSlug.includes("4o")) {
+                const contentArray = [];
+
+                if (content?.trim()) {
+                    contentArray.push({ type: "text", text: content.trim() });
+                }
+
+                attachments.forEach(att => {
+                    contentArray.push({
+                        type: "image_url",
+                        image_url: { url: att.url }
+                    });
+                });
+
+                messages.push({ role: "user", content: contentArray });
+            } else {
+                messages.push({ role: "user", content: content?.trim() || "এই ফাইলগুলো দেখো" });
+            }
+
             const result = await openai.chat.completions.create({
                 model: finalModelSlug.includes("o1") ? "o1-preview" : "gpt-4o-mini",
-                messages: [{ role: "user", content }],
+                messages,
                 stream: true
             });
 
@@ -553,14 +611,15 @@ const handleSendMessage = async (req, res, next) => {
                 fullResponse += text;
                 if (stream) res.write(text);
             }
+        }
 
-        } else {
-            // DeepSeek, Claude, Grok, Llama3, Mistral, Qwen → প্রক্সি দিয়ে
+        // ==================== অন্যান্য মডেল (Claude, Grok, Llama3, DeepSeek) ====================
+        else {
             const response = await axios.post(
                 `${process.env.PROXY_BASE_URL}/v1/chat/completions`,
                 {
                     model: finalModelSlug,
-                    messages: [{ role: "user", content }],
+                    messages: [{ role: "user", content: content?.trim() || "এই ফাইলগুলো দেখো" }],
                     stream: true
                 },
                 { responseType: "stream" }
@@ -578,7 +637,7 @@ const handleSendMessage = async (req, res, next) => {
                             const parsed = JSON.parse(data);
                             const text = parsed.choices[0]?.delta?.content || "";
                             fullResponse += text;
-                        } catch (e) {}
+                        } catch (e) { }
                     }
                 }
             });
@@ -586,18 +645,18 @@ const handleSendMessage = async (req, res, next) => {
             await new Promise(resolve => response.data.on("end", resolve));
         }
 
-        // স্ট্রিম শেষ
+        // স্ট্রিমিং শেষ
         if (stream) res.end();
         else res.json({ success: true, payload: { content: fullResponse } });
 
-        // AI রেসপন্স সেভ — শুধু model_id
+        // Assistant মেসেজ সেভ
         await pool.query(
             `INSERT INTO messages (chat_id, user_id, role, content, model_id, tokens_used)
              VALUES ($1, $2, 'assistant', $3, $4, $5)`,
             [chatId, userId, fullResponse, modelId, completionTokens || 0]
         );
 
-        // টোকেন আপডেট
+        // টোকেন + খরচ আপডেট
         await pool.query(
             `UPDATE chats 
              SET total_tokens_used = total_tokens_used + $1,
@@ -606,17 +665,107 @@ const handleSendMessage = async (req, res, next) => {
             [promptTokens + completionTokens, Math.round((completionTokens || 0) * 0.02), chatId]
         );
 
-        // অটো টাইটেল (প্রথম মেসেজ হলে)
-        const msgCount = await pool.query(`SELECT COUNT(*) FROM messages WHERE chat_id = $1`, [chatId]);
-        if (parseInt(msgCount.rows[0].count) === 2) {
-            // handleRegenerateTitle(chatId); // পরে যোগ করবি
-        }
-
     } catch (err) {
         console.error("SendMessage Error:", err.message);
         if (!res.headersSent) {
             next(createError(500, err.message || "Failed to send message"));
         }
+    }
+};
+
+const handleGetChatMessages = async (req, res, next) => {
+    const chatId = req.params.id;
+    const userId = req.user.id;
+    const limit = parseInt(req.query.limit) || 50;
+    const before = req.query.before ? parseInt(req.query.before) : null; // pagination cursor
+
+    try {
+        // ১. চ্যাটটা ইউজারের কিনা চেক কর
+        const chatCheck = await pool.query(
+            `SELECT id, user_id, _deleted FROM chats WHERE id = $1`,
+            [chatId]
+        );
+
+        if (chatCheck.rows.length === 0) {
+            return next(createError(404, "Chat not found"));
+        }
+
+        const chat = chatCheck.rows[0];
+
+        if (chat._deleted) {
+            return next(createError(410, "Chat has been deleted"));
+        }
+
+        if (chat.user_id !== userId) {
+            return next(createError(403, "You don't have access to this chat"));
+        }
+
+        // ২. মেসেজগুলো নিয়ে আয় (model info সহ)
+        let query = `
+            SELECT 
+                m.id,
+                m.role,
+                m.content,
+                m.tokens_used,
+                m.cost_cents,
+                m.attachments,
+                m.is_edited,
+                m.created_at,
+                mdl.slug AS model_slug,
+                mdl.display_name AS model_name,
+                mdl.provider AS model_provider
+            FROM messages m
+            LEFT JOIN models mdl ON m.model_id = mdl.id
+            WHERE m.chat_id = $1 AND m.is_deleted = false
+        `;
+
+        const params = [chatId];
+        let paramIndex = 2;
+
+        if (before) {
+            query += ` AND m.id < $${paramIndex}`;
+            params.push(before);
+            paramIndex++;
+        }
+
+        query += ` ORDER BY m.created_at DESC`;
+        query += ` LIMIT $${paramIndex}`;
+        params.push(limit);
+
+        const result = await pool.query(query, params);
+
+        // যদি আরো মেসেজ থাকে (hasMore)
+        const hasMore = result.rows.length === limit;
+
+        // পুরানো থেকে নতুনের দিকে রিভার্স করব (UI এর জন্য)
+        const messages = result.rows.reverse().map(msg => ({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+            tokens_used: msg.tokens_used || 0,
+            cost_cents: msg.cost_cents || 0,
+            attachments: msg.attachments || null,
+            is_edited: msg.is_edited,
+            created_at: msg.created_at,
+            model: msg.model_slug ? {
+                slug: msg.model_slug,
+                name: msg.model_name,
+                provider: msg.model_provider
+            } : null
+        }));
+
+        res.json({
+            success: true,
+            payload: {
+                messages,
+                hasMore,
+                nextCursor: hasMore ? result.rows[result.rows.length - 1].id : null
+            }
+        });
+
+    } catch (err) {
+        console.error("GetChatMessages Error:", err.message);
+        next(createError(500, "Failed to load messages"));
     }
 };
 
@@ -633,5 +782,6 @@ module.exports = {
     handleDeleteChat,
     handleRegenerateTitle,
     handleSendMessage,
+    handleGetChatMessages,
     
 };

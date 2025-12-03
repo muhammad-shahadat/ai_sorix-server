@@ -43,32 +43,6 @@
 --     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 -- );
 
--- 3. un used Subscriptions
--- CREATE TABLE subscriptions (
---     id BIGSERIAL PRIMARY KEY,
---     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
---     plan_id INTEGER NOT NULL REFERENCES plans(id) ON DELETE RESTRICT,
---     status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (status IN ('active','past_due','canceled','trialing','expired')),
---     current_period_start TIMESTAMP NOT NULL,
---     current_period_end TIMESTAMP NOT NULL,
---     trial_start TIMESTAMP,
---     trial_end TIMESTAMP,
---     cancel_at_period_end BOOLEAN NOT NULL DEFAULT false,
---     canceled_at TIMESTAMP,
---     external_subscription_id VARCHAR(255),
---     provider VARCHAR(100),
---     next_billing_date TIMESTAMP,
---     auto_renew BOOLEAN NOT NULL DEFAULT true,
---     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
---     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
---     UNIQUE (user_id)
--- );
-
--- -- এই ইনডেক্সগুলো যোগ করলে কোয়েরি সুপার ফাস্ট হবে
--- CREATE INDEX idx_subscriptions_active ON subscriptions(user_id) WHERE status = 'active';
--- CREATE INDEX idx_subscriptions_period_end ON subscriptions(current_period_end);
-
-
 --updated used subscription table --
 --or--
 -- Final Production-Ready Subscriptions Table (BD + Global + Error-Free)
@@ -263,7 +237,7 @@ CREATE TABLE messages (
     deleted_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id, created_at)
+    PRIMARY KEY (id)
 ) PARTITION BY RANGE (created_at);
 
 CREATE INDEX idx_messages_chat_created ON messages (chat_id, created_at DESC);
@@ -293,17 +267,31 @@ CREATE TABLE files (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     chat_id BIGINT REFERENCES chats(id) ON DELETE SET NULL,
-    message_id BIGINT REFERENCES messages(id, created_at) ON DELETE SET NULL,
+    
+    -- এই দুইটা কলাম দিয়ে রেফার করবি
+    message_id BIGINT,
+    message_created_at TIMESTAMP WITHOUT TIME ZONE,
+    
     storage_path VARCHAR(1024) NOT NULL,
     original_name VARCHAR(512) NOT NULL,
     mime_type VARCHAR(200) NOT NULL,
     size_bytes BIGINT NOT NULL,
     file_hash VARCHAR(64),
-    virus_status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (virus_status IN ('clean','pending','infected')),
-    uploaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    virus_status VARCHAR(20) NOT NULL DEFAULT 'pending' 
+        CHECK (virus_status IN ('clean','pending','infected')),
+    uploaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- এই লাইনটা সবচে গুরুত্বপূর্ণ
+    CONSTRAINT fk_message 
+        FOREIGN KEY (message_id, message_created_at) 
+        REFERENCES messages(id, created_at) 
+        ON DELETE SET NULL
 );
+
+-- ইনডেক্সগুলো আগের মতোই
 CREATE INDEX idx_files_user ON files(user_id);
 CREATE INDEX idx_files_hash ON files(file_hash);
+CREATE INDEX idx_files_message ON files(message_id, message_created_at);
 
 -- 11. Images
 CREATE TABLE images (

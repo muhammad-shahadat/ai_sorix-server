@@ -2,7 +2,7 @@ const express = require("express");
 
 const authRole = require("../middleware/authRole");
 const passport = require("../passport");
-const { handleGetChats, handleCreateChat, handleGetChatById, handleUpdateChat, handleDeleteChat, handleRegenerateTitle, handleSendMessage } = require("../controllers/chatsController");
+const { handleGetChats, handleCreateChat, handleGetChatById, handleUpdateChat, handleDeleteChat, handleRegenerateTitle, handleSendMessage, handleGetChatMessages } = require("../controllers/chatsController");
 
 
 
@@ -39,7 +39,7 @@ router.get("/:id",
 // PATCH /api/chats/:id → টাইটেল, মডেল বা আর্কাইভ স্ট্যাটাস চেঞ্জ
 router.patch("/:id",
     authenticate,
-    authRole("admin", "user"),  
+    authRole("admin", "user"),
     handleUpdateChat
 
 );
@@ -64,6 +64,13 @@ router.post("/:id/messages",
     authenticate,
     authRole("admin", "user"),
     handleSendMessage
+);
+
+//get chat-message history
+router.get("/:id/messages",
+    authenticate,
+    authRole("admin", "user"),
+    handleGetChatMessages,
 );
 
 
